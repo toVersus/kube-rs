@@ -1,10 +1,14 @@
 use k8s_openapi::{
+    api::{
+        batch::{
+            v1::JobSpec,
+            v1beta1::{CronJob, CronJobSpec, JobTemplateSpec},
+        },
+        core::v1::{Container, PodSpec, PodTemplateSpec},
+    },
     apimachinery::pkg::apis::meta::v1::ObjectMeta,
-    api::batch::v1beta1::{CronJob, CronJobSpec, JobTemplateSpec},
-    api::batch::v1::JobSpec,
-    api::core::v1::{PodTemplateSpec, PodSpec, Container},
 };
-use kube::{Api, api::PostParams, client::APIClient, config};
+use kube::{api::PostParams, client::APIClient, config, Api};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,16 +33,12 @@ async fn main() -> anyhow::Result<()> {
                 spec: Some(JobSpec {
                     template: PodTemplateSpec {
                         spec: Some(PodSpec {
-                            containers: vec![
-                                Container {
-                                    name: "hello".into(),
-                                    image: Some("busybox".into()),
-                                    args: Some(vec!["/bin/sh".into(),
-                                    "-c".into(),
-                                    "date; echo Hello".into()]),
-                                    ..Default::default()
-                                }
-                            ],
+                            containers: vec![Container {
+                                name: "hello".into(),
+                                image: Some("busybox".into()),
+                                args: Some(vec!["/bin/sh".into(), "-c".into(), "date; echo Hello".into()]),
+                                ..Default::default()
+                            }],
                             restart_policy: Some("OnFailure".into()),
                             ..Default::default()
                         }),
@@ -51,7 +51,8 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         }),
         status: None,
-    }).await?;
+    })
+    .await?;
 
     Ok(())
 }
