@@ -66,15 +66,58 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub fn load() -> Result<Credentials> {
-        let path = env::var_os(GOOGLE_APPLICATION_CREDENTIALS)
-            .map(PathBuf::from)
-            .ok_or_else(|| Error::Kubeconfig("Missing GOOGLE_APPLICATION_CREDENTIALS env".into()))?;
-        let f = File::open(path)
-            .map_err(|e| Error::Kubeconfig(format!("Unable to load credentials file: {}", e)))?;
-        let config = serde_json::from_reader(f)
-            .map_err(|e| Error::Kubeconfig(format!("Unable to parse credentials file: {}", e)))?;
-        Ok(config)
+    // Infer GCP project ID from GCP Metadata Server
+    async fn infer() -> Result<Credentials> {
+        /*
+        let url = "http://metadata.google.internal/computeMetadata/v1/project/project-id";
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(url)
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .await
+            .map_err(|e| Error::Kubeconfig(format!("Unable to request GCP project ID: {}", e)))
+            .and_then(|response| {
+                if response.status() != reqwest::StatusCode::OK {
+                    Err(Error::Kubeconfig(format!(
+                        "Fail to retrieve GCP project ID {:#?}",
+                        response
+                    )))
+                } else {
+                    Ok(response)
+                }
+            })?
+            .text()
+            .await?;
+            */
+
+        Ok(Credentials {
+            typ: String::new(),
+            project_id: String::new(),
+            private_key_id: String::new(),
+            private_key: String::new(),
+            client_email: String::new(),
+            client_id: String::new(),
+            auth_uri: String::new(),
+            token_uri: String::new(),
+            auth_provider_x509_cert_url: String::new(),
+            client_x509_cert_url: String::new(),
+        })
+    }
+
+    pub async fn load() -> Result<Credentials> {
+        let path = match env::var_os(GOOGLE_APPLICATION_CREDENTIALS) {
+            Some(p) => PathBuf::from(p),
+            None => well_known_gcp_credentials_file(),
+        };
+        if path.exists() {
+            let f = File::open(path)
+                .map_err(|e| Error::Kubeconfig(format!("Unable to load credentials file: {}", e)))?;
+            let config = serde_json::from_reader(f)
+                .map_err(|e| Error::Kubeconfig(format!("Unable to parse credentials file: {}", e)))?;
+            return Ok(config);
+        }
+        Ok(Credentials::infer().await?)
     }
 }
 
@@ -112,14 +155,44 @@ pub struct Token {
 }
 
 impl CredentialsClient {
-    pub fn new() -> Result<CredentialsClient> {
+    pub async fn new() -> Result<CredentialsClient> {
         Ok(CredentialsClient {
-            credentials: Credentials::load()?,
+            credentials: Credentials::load().await?,
             client: reqwest::Client::new(),
         })
     }
 
     pub async fn request_token(&self, scopes: &[String]) -> Result<Token> {
+        if self.credentials.typ.is_empty() && self.credentials.project_id.is_empty() {
+            debug!("Retrieve DefaultApplicationCredentials from GCE Metadata Server");
+            let mut url = url::Url::parse(
+                "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            )?;
+            url.set_query(Some(format!("scopes={}", scopes.join(",")).as_str()));
+            let default_token_response = self
+                .client
+                .get(url.as_str())
+                .header("Metadata-Flavor", "Google")
+                .send()
+                .await
+                .map_err(|e| {
+                    Error::Kubeconfig(format!("Unable to request DefaultApplicationCredentials: {}", e))
+                })
+                .and_then(|response| {
+                    if response.status() != reqwest::StatusCode::OK {
+                        Err(Error::Kubeconfig(format!(
+                            "Fail to retrieve DefaultApplicationCredentials {:#?}",
+                            response
+                        )))
+                    } else {
+                        Ok(response)
+                    }
+                })?
+                .json::<TokenResponse>()
+                .await
+                .map_err(|e| Error::Kubeconfig(format!("Unable to parse request token: {}", e)))?;
+            return Ok(default_token_response.into_token());
+        }
         let encoded = jws_encode(
             &Claim::new(&self.credentials, scopes),
             &Header {
@@ -204,6 +277,17 @@ fn sign(signature_base: &str, private_key: &str) -> Result<Vec<u8>> {
 
 fn base64_encode(bytes: &[u8]) -> String {
     base64::encode_config(bytes, base64::URL_SAFE)
+}
+
+// Infer target OS and retrieve well known path to GCP credentials
+fn well_known_gcp_credentials_file() -> PathBuf {
+    let mut path = PathBuf::new();
+    if cfg!(target_os = "windows") {
+        path.push(env::var_os("APPDATA").map(PathBuf::from).unwrap());
+    } else {
+        path = dirs::home_dir().unwrap();
+    }
+    path.join("gcloud/application_default_credentials.json")
 }
 
 #[cfg(test)]
